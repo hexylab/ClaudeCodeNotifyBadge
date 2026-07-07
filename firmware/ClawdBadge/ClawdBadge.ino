@@ -36,15 +36,15 @@
 // パネル仕様
 #define LCD_W 172
 #define LCD_H 320
-#define LCD_ROTATION 1 // 横向き 320x172 で使用
+#define LCD_ROTATION 2 // 縦向き 172x320 (旧ランドスケープの右辺が上)。実機確認済み: 0だと上下逆
 #define LCD_COL_OFFSET1 34
 #define LCD_ROW_OFFSET1 0
 #define LCD_COL_OFFSET2 34
 #define LCD_ROW_OFFSET2 0
 
-// 回転後の実座標系サイズ (rotation=1/3 でランドスケープ)
-#define SCR_W 320
-#define SCR_H 172
+// 回転後の実座標系サイズ (rotation=0/2 でポートレート)
+#define SCR_W 172
+#define SCR_H 320
 
 // ============================================================
 // GFXバス / パネル / キャンバス
@@ -321,12 +321,18 @@ uint8_t animFrameIndexForTime(const ClawdAnim &anim, unsigned long t) {
   return anim.seq[anim.seqLen - 1];
 }
 
+// 縦レイアウトのキャラ配置領域 (ヘッダー下〜フッタードット上)
+#define CLAWD_AREA_TOP 34
+#define CLAWD_AREA_BOTTOM (SCR_H - 24)
+
 // 1フレーム分のRLEをデコードして描画する。
-// 全状態共通の絶対座標変換: screen_x = offX + 9 + x, screen_y = offY - 104 + y
+// 縦画面用配置: 水平センタリング + 配置領域内で垂直センタリング。
+// スプライトが画面幅より広い場合 (ANIM_HAPPY=193px) は左右を均等にクリップ。
 void drawClawdFrame(Arduino_GFX *g, const ClawdAnim &anim, uint8_t frameIdx) {
   const ClawdFrame &f = anim.frames[frameIdx];
-  const int16_t baseX = anim.offX + 9;
-  const int16_t baseY = anim.offY - 104;
+  const int16_t baseX = (SCR_W - (int16_t)anim.w) / 2;
+  const int16_t baseY =
+      CLAWD_AREA_TOP + (CLAWD_AREA_BOTTOM - CLAWD_AREA_TOP - (int16_t)anim.h) / 2;
   const uint16_t w = anim.w;
   uint32_t pos = 0; // クロップ内の線形位置 (0..w*h-1)
 
@@ -343,8 +349,14 @@ void drawClawdFrame(Arduino_GFX *g, const ClawdAnim &anim, uint8_t frameIdx) {
         if (seg > remaining) seg = remaining;
         int16_t sy = baseY + (int16_t)y;
         if (sy >= 0 && sy < SCR_H) {
-          g->fillRect(baseX + (int16_t)x, sy, (int16_t)seg, 1,
-                      CLAWD_PALETTE[idx]);
+          // 横方向クリップ (画面外にはみ出す分を切り詰める)
+          int16_t sx = baseX + (int16_t)x;
+          int16_t sw = (int16_t)seg;
+          if (sx < 0) { sw += sx; sx = 0; }
+          if (sx + sw > SCR_W) sw = SCR_W - sx;
+          if (sw > 0) {
+            g->fillRect(sx, sy, sw, 1, CLAWD_PALETTE[idx]);
+          }
         }
         p += seg;
         remaining -= seg;
@@ -403,13 +415,14 @@ void drawHeader(Arduino_GFX *g, AppState s) {
 }
 
 void drawFooterDots(Arduino_GFX *g, AppState s, unsigned long t) {
-  // スプライト(中央)と重ならないよう左下隅に置く
+  // 縦レイアウトでは下部中央に置く (スプライト領域の下)
   int16_t cy = SCR_H - 12;
+  int16_t cx = SCR_W / 2;
   if (s == ST_WORKING) {
     // "..." が流れるアニメーション
     int active = (t / 400) % 4; // 0..3
     for (int i = 0; i < 3; i++) {
-      int16_t dx = 14 + i * 14;
+      int16_t dx = cx + (i - 1) * 14;
       uint16_t c = (i < active) ? COLOR_CORAL : COLOR_CLOUD;
       g->fillCircle(dx, cy, 3, c);
     }
@@ -417,7 +430,7 @@ void drawFooterDots(Arduino_GFX *g, AppState s, unsigned long t) {
     // 控えめな状態ドット (3つ、状態色で点灯)
     uint16_t c = stateColor(s);
     for (int i = 0; i < 3; i++) {
-      int16_t dx = 14 + i * 14;
+      int16_t dx = cx + (i - 1) * 14;
       g->fillCircle(dx, cy, 3, c);
     }
   }
