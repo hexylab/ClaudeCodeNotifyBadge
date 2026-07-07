@@ -43,7 +43,10 @@ def main() -> int:
     # メッセージが引数で渡された場合は stdin を読まない(対話シェルからの起動でブロックするため)
     try:
         if len(sys.argv) <= 2 and not sys.stdin.isatty():
-            raw = sys.stdin.read()
+            # Windows では sys.stdin がロケールエンコーディング(CP932等)で解釈され、
+            # UTF-8 の日本語がサロゲート文字化して送信時に例外になるため、
+            # バイナリで読んで明示的に UTF-8 デコードする
+            raw = sys.stdin.buffer.read().decode("utf-8", "replace")
             if raw.strip():
                 hook = json.loads(raw)
                 if not message:
@@ -71,7 +74,8 @@ def main() -> int:
         ser.dtr = False
         ser.rts = False
         ser.open()
-        ser.write((payload + "\n").encode("utf-8"))
+        # 想定外の不正文字が混じっても送信自体は成立させる
+        ser.write((payload + "\n").encode("utf-8", "replace"))
         ser.flush()
         ser.close()
     except Exception:
