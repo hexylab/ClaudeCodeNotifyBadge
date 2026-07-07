@@ -1,0 +1,16 @@
+{
+  "name": "clawd-badge",
+  "owner": {
+    "name": "hexylab"
+  },
+  "description": "ESP32-C6 LCD バッジ「Clawd Badge」で Claude Code の状態を通知するプラグイン",
+  "plugins": [
+    {
+      "name": "clawd-badge",
+      "source": "./plugin",
+      "description": "Claude Code の状態を ESP32-C6 LCD バッジへ USB シリアルで通知する hooks プラグイン",
+      "category": "productivity",
+      "keywords": ["esp32", "notification", "hardware", "badge", "serial", "hooks"]
+    }
+  ]
+}
