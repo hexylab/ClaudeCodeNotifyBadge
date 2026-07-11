@@ -20,6 +20,15 @@ import time
 BAUD = 115200
 ESPRESSIF_VID = 0x303A
 
+# Claude Code の Notification hook は権限承認以外(アイドル入力待ち等)でも発火する。
+# notification_type がこの集合に含まれる場合のみ、実際にユーザーの承認操作が必要なため
+# approval として送信する(それ以外は idle_prompt 等の情報通知であり送信しない)。
+APPROVAL_NOTIFICATION_TYPES = {
+    "permission_prompt",  # ツール実行の許可承認待ち
+    "elicitation_dialog",  # MCPサーバーがユーザー入力を要求
+    "agent_needs_input",  # バックグラウンドセッションが入力待ち
+}
+
 
 def find_port():
     port = os.environ.get("CLAUDE_BADGE_PORT")
@@ -43,6 +52,7 @@ def main() -> int:
     # sid(セッション識別子)取得のため、message が引数で渡されていても stdin は読む。
     # ただし対話シェルからの起動(isatty)ではブロックを避けるため読まない。
     sid = ""
+    notification_type = ""
     try:
         if not sys.stdin.isatty():
             # Windows では sys.stdin がロケールエンコーディング(CP932等)で解釈され、
@@ -55,8 +65,14 @@ def main() -> int:
                 if not message:
                     message = hook.get("message", "") or hook.get("prompt", "")[:48]
                 sid = hook.get("session_id", "")[:8]
+                notification_type = hook.get("notification_type", "") or ""
     except Exception:
         pass
+
+    # approval かつ notification_type が判明していて、かつ承認系種別でない場合は送信しない
+    # (idle_prompt 等の情報通知のため。notification_type が無い場合は後方互換として送信を継続する)
+    if state == "approval" and notification_type and notification_type not in APPROVAL_NOTIFICATION_TYPES:
+        return 0
 
     payload = json.dumps(
         {"state": state, "msg": message[:64], "sid": sid, "ts": int(time.time())},

@@ -85,6 +85,7 @@ clawd-badge setup --host <バッジのIP>
    - `UserPromptSubmit` → `working`（作業中）
    - `Stop` → `done`（作業完了）
    - `Notification` → `approval`（承認依頼・注意）
+     - `Notification` hookは権限承認以外（アイドル入力待ち等）でも発火するため、stdin JSONの `notification_type` が `permission_prompt` / `elicitation_dialog` / `agent_needs_input`（承認操作を伴う種別）のときのみ実際に `approval` を送信します。それ以外（`idle_prompt` 等）は送信をスキップします（`notification_type` が無い古いClaude Codeでは従来どおり送信します）。詳細は [`client/README.md`](client/README.md) 参照。
    - `SessionEnd` → `idle`
 2. USB シリアル経由の場合は `{"state":"working","sid":"...","msg":"...","ts":...}` の JSON 1 行を COM ポート (115200bps) へ、LAN 経由の場合は同様の内容を `POST /notify` へ送信
 3. ファームウェアが状態に応じた Clawd のアニメーションと LED 表示に切り替え

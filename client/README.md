@@ -61,7 +61,21 @@ npx -y clawd-badge setup --host 192.168.1.50
 - `state` は `working` `done` `approval` `notify` `idle` `error` のいずれか。
 - 送信先の解決順序: 環境変数 `CLAUDE_BADGE_HOST` → 設定ファイル(`~/.clawd-badge.json`)の `host` → mDNS名 `clawd-badge.local`。最初の候補で失敗した場合、次の候補に自動フォールバックします。
 - タイムアウトは3秒。**バッジに到達できない場合でも常に終了コード0・原則無出力**です(Claude Codeの動作をブロックしないための仕様です)。
-- 対話起動でない場合(Claude Code hooks経由など)は stdin から hook の JSON(`session_id` / `message` / `prompt`)を読み取り、`session_id` の先頭8文字を `sid`、`message`(または `prompt`)を64文字に切り詰めて `msg` として通知payloadに含めます。複数セッション対応のバッジ側でセッションを識別するために使われます。stdinの読み取り・解析に失敗した場合は `sid`/`msg` を付けずに送信します。
+- 対話起動でない場合(Claude Code hooks経由など)は stdin から hook の JSON(`session_id` / `message` / `prompt` / `notification_type`)を読み取り、`session_id` の先頭8文字を `sid`、`message`(または `prompt`)を64文字に切り詰めて `msg` として通知payloadに含めます。複数セッション対応のバッジ側でセッションを識別するために使われます。stdinの読み取り・解析に失敗した場合は `sid`/`msg` を付けずに送信します。
+
+#### Notification種別フィルタリング
+
+Claude Codeの `Notification` hookは、ツール実行の権限承認待ちだけでなく、アイドル入力待ち(`idle_prompt`)など承認操作を伴わない場面でも発火します。これらまで一律に `approval` として通知すると、承認不要な場面でもバッジに「承認待ち」が表示されてしまいます。
+
+そのため `state` が `approval` かつ stdin JSONに `notification_type` が含まれる場合、以下のように種別で送信可否を判定します。
+
+- `permission_prompt`(ツール実行の許可承認待ち)/ `elicitation_dialog`(MCPサーバーがユーザー入力を要求)/ `agent_needs_input`(バックグラウンドセッションが入力待ち) → そのまま `approval` を送信
+- それ以外の種別(`idle_prompt` など、未知の種別を含む) → 送信をスキップ(バッジの状態は変えません。入力待ち相当は `Stop` フックの `done` で既にカバーされているためです)
+- `notification_type` が無い場合(古いClaude Code) → 後方互換として従来どおり `approval` を送信
+
+#### デバッグログ
+
+`notify` 実行のたびに `~/.clawd-badge.log`(設定ファイルと同じ場所)へ、送信結果を1行のJSONとして追記します。ファイルサイズが256KBを超えると `~/.clawd-badge.log.1` へローテーションされます。ログ書き込みに失敗しても `notify` コマンド自体の動作(exit 0・無出力)には影響しません。
 
 ### `clawd-badge status`
 
@@ -89,6 +103,10 @@ npx -y clawd-badge setup --host 192.168.1.50
 ```
 
 `host` はsetup時に取得したIPアドレス、`hostname` はmDNS名のフォールバック先です。手動で編集しても構いません。
+
+## デバッグログ
+
+`~/.clawd-badge.json` と同じ場所の `~/.clawd-badge.log` に、`notify` 実行ごとの送信結果(引数の`state`・実際に送信した`state`・`notification_type`・送信先ホストまたは`failed`/`skipped`など)がJSON 1行ずつ追記されます。詳細は上記「Notification種別フィルタリング」を参照してください。
 
 ## トラブルシューティング
 
