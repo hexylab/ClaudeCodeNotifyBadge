@@ -1,0 +1,27 @@
+{
+  "name": "clawd-badge",
+  "version": "0.1.0",
+  "description": "LAN内のESP32バッジデバイスへClaude Codeの状態を送信するCLI/フック",
+  "type": "module",
+  "bin": {
+    "clawd-badge": "./bin/clawd-badge.js"
+  },
+  "files": [
+    "bin",
+    "lib",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT",
+  "keywords": [
+    "claude-code",
+    "esp32",
+    "badge",
+    "notify"
+  ],
+  "optionalDependencies": {
+    "serialport": "^12.0.0"
+  }
+}

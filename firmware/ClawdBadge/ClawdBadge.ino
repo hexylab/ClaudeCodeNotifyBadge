@@ -2,12 +2,19 @@
  * ClawdBadge - Claude Code ステータス通知バッジ
  * 対象基板: Waveshare ESP32-C6-Touch-LCD-1.47 (JD9853, 172x320, タッチ AXS5106L)
  *
- * PCで動作する Claude Code の状態を USB CDC シリアル (115200bps) から
- * 1行1メッセージのJSONで受信し、Anthropicデザインのマスコット「Clawd」
- * (オレンジ色のかわいいカニ) を状態に応じてアニメーション表示する。
+ * PCで動作する Claude Code の状態を USB CDC シリアル (115200bps) または
+ * WiFi経由のHTTP(POST /notify)から1メッセージのJSONで受信し、
+ * Anthropicデザインのマスコット「Clawd」(オレンジ色のかわいいカニ) を
+ * 状態に応じてアニメーション表示する。
  *
  * 受信JSON例: {"state":"working","msg":"...","ts":1234567890}
- * state: working | done | approval | notify | idle | error (未知は notify 扱い)
+ * state: working | done | approval | notify | idle | error (未知は notify 扱い。
+ *        ただしHTTP /notify では未知stateは400エラーを返す)
+ *
+ * WiFi: シリアル経由で {"cmd":"wifi","ssid":"...","pass":"..."} を送ると
+ * NVS(Preferences)に認証情報を保存して接続する。接続後はHTTPサーバ(ポート80)と
+ * mDNS(clawd-badge.local)が有効になり、USBを介さずLAN経由で状態通知を受け付ける。
+ * WiFi接続はloop内で非ブロッキングに処理され、未接続でもUSBシリアル動作に影響しない。
  *
  * LCDコントローラは JD9853 (ST7789互換コマンドセット)。Arduino_GFXに専用クラスが
  * 無いため Arduino_ST7789 を流用し、begin() 直後にWaveshare公式デモ由来の
@@ -16,6 +23,10 @@
  */
 
 #include <Arduino_GFX_Library.h>
+#include <WiFi.h>
+#include <WebServer.h>
+#include <ESPmDNS.h>
+#include <Preferences.h>
 #include "ClawdTypes.h"
 #include "clawd_sprites.h"
 
@@ -206,6 +217,41 @@ String extractStateToken(const String &line) {
   return line.substring(q1 + 1, q2);
 }
 
+// "key":"value" を単純な文字列検索で抽出する汎用版。
+// \" \\ \n \t \/ の最低限のエスケープを解除する(日本語等のマルチバイトは
+// UTF-8のまま無加工で通す)。
+String extractStringField(const String &line, const String &key) {
+  String pat = "\"" + key + "\"";
+  int idx = line.indexOf(pat);
+  if (idx < 0) return String();
+  int colon = line.indexOf(':', idx + pat.length());
+  if (colon < 0) return String();
+  int q1 = line.indexOf('"', colon + 1);
+  if (q1 < 0) return String();
+  String out;
+  int i = q1 + 1;
+  int len = line.length();
+  while (i < len) {
+    char c = line[i];
+    if (c == '\\' && i + 1 < len) {
+      char n = line[i + 1];
+      if (n == '"') { out += '"'; i += 2; continue; }
+      if (n == '\\') { out += '\\'; i += 2; continue; }
+      if (n == 'n') { out += '\n'; i += 2; continue; }
+      if (n == 't') { out += '\t'; i += 2; continue; }
+      if (n == '/') { out += '/'; i += 2; continue; }
+      // 未対応のエスケープ(\uXXXX等)はそのまま残す
+      out += c;
+      i += 1;
+      continue;
+    }
+    if (c == '"') break; // 終端(エスケープされていない引用符)
+    out += c;
+    i += 1;
+  }
+  return out;
+}
+
 AppState tokenToState(const String &tok) {
   if (tok == "working") return ST_WORKING;
   if (tok == "done") return ST_DONE;
@@ -216,18 +262,44 @@ AppState tokenToState(const String &tok) {
   return ST_NOTIFY; // 未知のstateはnotify扱い
 }
 
+// 既知のstate文字列かどうか (HTTP側で不明stateを400にするために使用)
+bool isKnownStateToken(const String &tok) {
+  return tok == "working" || tok == "done" || tok == "approval" ||
+         tok == "notify" || tok == "idle" || tok == "error";
+}
+
+const char *stateToken(AppState s) {
+  switch (s) {
+    case ST_WORKING: return "working";
+    case ST_DONE: return "done";
+    case ST_APPROVAL: return "approval";
+    case ST_NOTIFY: return "notify";
+    case ST_IDLE: return "idle";
+    case ST_ERROR: return "error";
+  }
+  return "idle";
+}
+
 void enterState(AppState s) {
   currentState = s;
   stateEnteredMs = millis();
 }
 
-void handleSerialLine(const String &line) {
-  if (line.length() == 0) return;
-  String tok = extractStateToken(line);
-  if (tok.length() == 0) return; // stateキーが無い行は無視
-  AppState s = tokenToState(tok);
+// シリアル/HTTP共通の状態適用処理
+void applyState(AppState s) {
   lastMsgMs = millis();
   if (s != currentState) enterState(s);
+}
+
+void handleSerialLine(const String &line) {
+  if (line.length() == 0) return;
+  if (line.indexOf("\"cmd\"") >= 0) {
+    handleSerialCommand(line);
+    return;
+  }
+  String tok = extractStateToken(line);
+  if (tok.length() == 0) return; // stateキーが無い行は無視
+  applyState(tokenToState(tok));
 }
 
 void pollSerial() {
@@ -250,6 +322,164 @@ void checkTimeouts() {
              currentState == ST_NOTIFY) {
     if (now - lastMsgMs > TIMEOUT_SHORT_MS) enterState(ST_IDLE);
   }
+}
+
+// ============================================================
+// WiFi接続 + NVS永続化 + シリアルプロビジョニング + HTTPサーバ
+// ============================================================
+Preferences prefs;
+WebServer httpServer(80);
+
+bool wifiConfigured = false;      // NVSに認証情報が保存されているか
+bool wifiConnecting = false;      // 接続試行中か
+bool wifiAnnounceThisAttempt = false; // 今回の試行結果をシリアルに出すか
+bool wifiServicesStarted = false; // HTTPサーバ/mDNSを一度でも起動したか
+String wifiSavedSsid;
+String wifiSavedPass;
+unsigned long wifiConnectStartMs = 0;
+unsigned long lastWifiRetryMs = 0;
+const unsigned long WIFI_CONNECT_TIMEOUT_MS = 20000; // 約20秒
+const unsigned long WIFI_RETRY_INTERVAL_MS = 15000;  // 再接続間隔
+
+void wifiSaveCreds(const String &ssid, const String &pass) {
+  prefs.begin("clawd", false);
+  prefs.putString("ssid", ssid);
+  prefs.putString("pass", pass);
+  prefs.end();
+}
+
+void wifiLoadCreds(String &ssid, String &pass) {
+  prefs.begin("clawd", true);
+  ssid = prefs.getString("ssid", "");
+  pass = prefs.getString("pass", "");
+  prefs.end();
+}
+
+void wifiClearCreds() {
+  prefs.begin("clawd", false);
+  prefs.remove("ssid");
+  prefs.remove("pass");
+  prefs.end();
+}
+
+void printWifiEvent(const char *status) {
+  Serial.print("{\"event\":\"wifi\",\"status\":\"");
+  Serial.print(status);
+  Serial.println("\"}");
+}
+
+void printWifiConnected() {
+  Serial.print("{\"event\":\"wifi\",\"status\":\"connected\",\"ip\":\"");
+  Serial.print(WiFi.localIP().toString());
+  Serial.println("\",\"hostname\":\"clawd-badge.local\"}");
+}
+
+// HTTPサーバ + mDNSを(再)起動する。接続/再接続のたびに呼んでよい。
+void startWifiServices() {
+  httpServer.begin();
+  wifiServicesStarted = true;
+  if (MDNS.begin("clawd-badge")) {
+    MDNS.addService("http", "tcp", 80);
+  }
+}
+
+// 非ブロッキングでWiFi接続を開始する。announce=trueなら結果をシリアルへ出力する。
+void startWifiConnect(const String &ssid, const String &pass, bool announce) {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid.c_str(), pass.c_str());
+  wifiConnecting = true;
+  wifiAnnounceThisAttempt = announce;
+  wifiConnectStartMs = millis();
+  if (announce) printWifiEvent("connecting");
+}
+
+// POST /notify: 既存シリアルと同形式のJSONを受け取り状態遷移する
+void handleHttpNotify() {
+  String body = httpServer.hasArg("plain") ? httpServer.arg("plain") : String();
+  String tok = extractStateToken(body);
+  if (tok.length() == 0 || !isKnownStateToken(tok)) {
+    httpServer.send(400, "application/json", "{\"ok\":false,\"error\":\"unknown state\"}");
+    return;
+  }
+  applyState(tokenToState(tok));
+  httpServer.send(200, "application/json", "{\"ok\":true}");
+}
+
+// GET /status: 現在状態とネットワーク情報を返す
+void handleHttpStatus() {
+  bool connected = (WiFi.status() == WL_CONNECTED);
+  String ip = connected ? WiFi.localIP().toString() : String("0.0.0.0");
+  long rssi = connected ? WiFi.RSSI() : 0;
+  String json = String("{\"state\":\"") + stateToken(currentState) +
+                "\",\"ip\":\"" + ip + "\",\"rssi\":" + String(rssi) +
+                ",\"uptime\":" + String(millis() / 1000UL) + "}";
+  httpServer.send(200, "application/json", json);
+}
+
+// {"cmd":"..."} で始まるシリアル行(WiFiプロビジョニング用コマンド)を処理する
+void handleSerialCommand(const String &line) {
+  String cmd = extractStringField(line, "cmd");
+  if (cmd == "wifi") {
+    String ssid = extractStringField(line, "ssid");
+    String pass = extractStringField(line, "pass");
+    if (ssid.length() == 0) return; // SSID未指定は無視
+    wifiSaveCreds(ssid, pass);
+    wifiSavedSsid = ssid;
+    wifiSavedPass = pass;
+    wifiConfigured = true;
+    startWifiConnect(ssid, pass, true);
+  } else if (cmd == "wifi_status") {
+    if (!wifiConfigured) {
+      printWifiEvent("unconfigured");
+    } else if (WiFi.status() == WL_CONNECTED) {
+      printWifiConnected();
+    } else if (wifiConnecting) {
+      printWifiEvent("connecting");
+    } else {
+      printWifiEvent("failed");
+    }
+  } else if (cmd == "wifi_clear") {
+    wifiClearCreds();
+    wifiConfigured = false;
+    wifiConnecting = false;
+    WiFi.disconnect(true, true);
+    printWifiEvent("cleared");
+  }
+}
+
+// loop内でWiFi接続状態を監視する。接続待ちはブロッキングしない。
+void pollWifi() {
+  static bool wasConnected = false;
+  bool nowConnected = (WiFi.status() == WL_CONNECTED);
+
+  if (wifiConnecting) {
+    if (nowConnected) {
+      wifiConnecting = false;
+      if (wifiAnnounceThisAttempt) printWifiConnected();
+    } else if (millis() - wifiConnectStartMs > WIFI_CONNECT_TIMEOUT_MS) {
+      wifiConnecting = false;
+      lastWifiRetryMs = millis();
+      if (wifiAnnounceThisAttempt) printWifiEvent("failed");
+    }
+  } else if (wifiConfigured && !nowConnected) {
+    // 切断中は一定間隔で静かに再接続を試みる
+    // (arduino-esp32のWiFiスタック自身が先に自動再接続することもあるが、
+    //  その場合は下のwasConnectedによるエッジ検出でサービス再起動される)
+    if (millis() - lastWifiRetryMs >= WIFI_RETRY_INTERVAL_MS) {
+      lastWifiRetryMs = millis();
+      startWifiConnect(wifiSavedSsid, wifiSavedPass, false);
+    }
+  }
+
+  // 切断->接続への変化を検出したら毎回サービスを(再)起動する。
+  // WiFiスタックの自動再接続でwifiConnectingを経由せず復帰するケースも
+  // これで確実に拾う (mDNSは特にインターフェース再確立後に再起動が必要)。
+  if (nowConnected && !wasConnected) {
+    startWifiServices();
+  }
+  wasConnected = nowConnected;
+
+  if (wifiServicesStarted) httpServer.handleClient();
 }
 
 // ============================================================
@@ -504,10 +734,25 @@ void setup() {
 
   stateEnteredMs = millis();
   lastMsgMs = millis();
+
+  // HTTPルートはWiFi未接続でも先に登録しておく(接続後にstartWifiServices()でbegin()する)
+  httpServer.on("/notify", HTTP_POST, handleHttpNotify);
+  httpServer.on("/status", HTTP_GET, handleHttpStatus);
+
+  // NVSに保存済みのWiFi認証情報があれば非ブロッキングで接続開始
+  String savedSsid, savedPass;
+  wifiLoadCreds(savedSsid, savedPass);
+  if (savedSsid.length() > 0) {
+    wifiSavedSsid = savedSsid;
+    wifiSavedPass = savedPass;
+    wifiConfigured = true;
+    startWifiConnect(savedSsid, savedPass, false);
+  }
 }
 
 void loop() {
   pollSerial();
+  pollWifi();
   checkTimeouts();
 
   unsigned long now = millis();
