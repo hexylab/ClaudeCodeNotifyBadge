@@ -1,29 +1,75 @@
-# Claude Code Notify Badge (Clawd Badge)
+# Clawd Badge — Claude Code Notify Badge
 
-Waveshare ESP32-C6-Touch-LCD-1.47 を Claude Code のステータスバッジにするプロジェクト。
-PC 上の Claude Code の状態（作業中 / 完了 / 承認待ち など）を USB シリアル経由で受信し、
-Anthropic デザインの画面でマスコット「Clawd」がアニメーションで知らせてくれます。
+**手のひらサイズの ESP32 バッジが、Claude Code の「今」を教えてくれる。**
 
-## 構成
+Claude Code に長いタスクを任せてブラウザを見ていたら、いつの間にか承認待ちで止まっていた——そんな経験はありませんか?
+Clawd Badge は Waveshare **ESP32-C6-Touch-LCD-1.47** をデスクに置ける物理ステータスバッジに変えるプロジェクトです。マスコット **Clawd** が、作業中はハサミをカチカチ、完了したらぴょんと跳ねて ✓、承認が必要なら手を振って知らせてくれます。
 
-```
-firmware/ClawdBadge/     ESP32-C6 用 Arduino ファームウェア (JD9853 172x320)
-plugin/                  Claude Code プラグイン (hooks + 通知スクリプト、USB シリアル版)
-client/                  npm クライアント clawd-badge (hooks + CLI、LAN/HTTP 版)
-bridge/notify_device.py  旧・手動設定用スクリプト(プラグイン版は plugin/scripts/ 参照)
-tools/gen_sprites.py     Clawd スプライト(clawd_sprites.h)を参照 GIF から再生成するツール
-```
+<p align="center">
+  <img src="docs/media/demo.gif" alt="Clawd Badge 動作デモ" width="280">
+</p>
 
-バッジへの通知経路は次の 2 通りがあります。用途に応じて選んでください。
+▶ 高画質版の動画は [docs/media/demo.mp4](docs/media/demo.mp4) をご覧ください。
 
-1. **USB シリアル接続 + Claude Code プラグイン**(従来どおり): バッジを USB 接続した PC でのみ動作。
-2. **LAN 経由(WiFi)+ npm クライアント**(新規): バッジが WiFi に一度接続されれば、同じ LAN 上の任意の PC から HTTP で通知できます。
+## 特徴
 
-## 使い方(1) USB シリアル接続 + Claude Code プラグイン
+- 🎬 **状態がひと目でわかる** — working / done / approval / notify / error / idle をアニメーションで表示
+- 📡 **USB でも WiFi でも** — USB シリアル直結、または一度 WiFi 設定すれば LAN 上のどの PC からでも HTTP で通知可能
+- 🪄 **セットアップは実質ワンコマンド** — Claude Code プラグイン、または `clawd-badge setup` で hooks 登録まで自動
+- 👥 **複数セッション対応** — 複数マシン・複数ターミナルの状態を最大8セッションまで集約表示(画面下部にセッションドット)
+- 🖨️ **3Dプリントケース付き** — 専用ケースの STL を同梱([`hardware/`](hardware/))
 
-pyserial を入れて、プラグインをインストールするだけです:
+## 動作の仕組み
 
 ```
+Claude Code (hooks) ──► clawd-badge notify / notify_device.py ──► バッジ
+     │                                                              │
+     │  UserPromptSubmit → working      USB シリアル (JSON 1行)      │
+     │  Stop             → done    or   HTTP POST /notify (LAN)     │
+     │  Notification     → approval                                 │
+     │  SessionEnd       → idle                                     │
+     └──────────────────────────────────────────────────────────────┘
+```
+
+Claude Code の hooks がイベント発生時に通知クライアントを起動し、`{"state":"working","sid":"...","msg":"...","ts":...}` の JSON をバッジへ送信。ファームウェアが状態に応じた Clawd のアニメーションに切り替えます。
+
+`Notification` hook は権限承認以外(アイドル入力待ち等)でも発火するため、stdin JSON の `notification_type` が `permission_prompt` / `elicitation_dialog` / `agent_needs_input` のときのみ `approval` を送信します(`notification_type` が無い古い Claude Code では従来どおり送信)。詳細は [`client/README.md`](client/README.md) 参照。
+
+## 状態と表示
+
+| state    | Clawd の様子                    |
+|----------|--------------------------------|
+| working  | ハサミをカチカチ、タイピング風   |
+| done     | ぴょんと跳ねて ✓                |
+| approval | 手を振って「?」吹き出し          |
+| notify   | ベル＋首かしげ                  |
+| idle     | ゆっくり呼吸＋まばたき           |
+| error    | 目が「><」                      |
+
+## 必要なもの
+
+- [Waveshare ESP32-C6-Touch-LCD-1.47](https://www.waveshare.com/wiki/ESP32-C6-Touch-LCD-1.47)(タッチ版、LCD コントローラ JD9853)
+- USB Type-C ケーブル
+- (任意)3D プリンタ — 専用ケース [`hardware/clawd-badge-body.stl`](hardware/clawd-badge-body.stl)
+
+## クイックスタート
+
+### 1. ファームウェアの書き込み
+
+WiFi / WebServer / mDNS を含むためパーティションは `min_spiffs` を指定します(フラッシュ使用率 74%・RAM 使用率 14% で検証済み):
+
+```powershell
+arduino-cli compile --fqbn esp32:esp32:esp32c6:CDCOnBoot=cdc,PartitionScheme=min_spiffs firmware\ClawdBadge
+arduino-cli upload -p COM5 --fqbn esp32:esp32:esp32c6:CDCOnBoot=cdc,PartitionScheme=min_spiffs firmware\ClawdBadge
+```
+
+### 2. 通知経路を選ぶ
+
+#### A. USB シリアル + Claude Code プラグイン(いちばん簡単)
+
+バッジを USB 接続した PC で使う場合。pyserial を入れてプラグインをインストールするだけです:
+
+```bash
 pip install pyserial
 ```
 
@@ -34,12 +80,11 @@ Claude Code 内で:
 /plugin install clawd-badge@clawd-badge
 ```
 
-シリアルポートは自動検出(Espressif VID 0x303A)。明示したい場合は
-環境変数 `CLAUDE_BADGE_PORT` を設定してください。詳細は `plugin/README.md` 参照。
+シリアルポートは自動検出(Espressif VID 0x303A)。明示したい場合は環境変数 `CLAUDE_BADGE_PORT` を設定してください。詳細は [`plugin/README.md`](plugin/README.md) 参照。
 
-## 使い方(2) LAN 経由(WiFi)+ npm クライアント
+#### B. WiFi / LAN + npm クライアント(どの PC からでも)
 
-ファームウェアが WiFi と HTTP サーバ(`POST /notify`)に対応したことで、バッジを USB 接続していない PC からも LAN 経由で状態を通知できるようになりました。npm パッケージ名は `clawd-badge`(Node.js 18 以上)です。
+バッジを一度 WiFi につなげば、USB 接続なしで LAN 上の任意の PC から通知できます(Node.js 18 以上)。
 
 現時点では npm 未公開のため、リポジトリからインストールしてください:
 
@@ -54,9 +99,9 @@ npm i -g ./ClaudeCodeNotifyBadge/client
 clawd-badge setup
 ```
 
-SSID・パスワードを対話入力すると、シリアル経由でバッジに書き込み → WiFi 接続 → IP アドレス取得 → `~/.clawd-badge.json` に保存 → Claude Code の hooks(`~/.claude/settings.json`)への自動登録、まで行われます。
+SSID・パスワードを対話入力すると、シリアル経由での WiFi 書き込み → IP 取得 → `~/.clawd-badge.json` への保存 → Claude Code hooks(`~/.claude/settings.json`)の自動登録まで行われます。
 
-バッジの IP がすでに分かっている別の PC では、シリアル接続なしでセットアップできます:
+バッジの IP が分かっている別の PC では、シリアル接続なしでセットアップできます:
 
 ```bash
 clawd-badge setup --host <バッジのIP>
@@ -68,78 +113,68 @@ clawd-badge setup --host <バッジのIP>
 - `clawd-badge status` — バッジの現在状態を確認
 - `clawd-badge unhook` — 登録した hooks を削除
 
-送信先の解決順は 環境変数 `CLAUDE_BADGE_HOST` > `~/.clawd-badge.json` > mDNS 名 `clawd-badge.local` です。
+送信先の解決順は 環境変数 `CLAUDE_BADGE_HOST` > `~/.clawd-badge.json` > mDNS 名 `clawd-badge.local` です。詳細は [`client/README.md`](client/README.md) を参照してください。
 
-詳細なコマンドリファレンスやトラブルシューティングは [`client/README.md`](client/README.md) を参照してください。
+### 3. 動作確認
 
-## ハードウェア仕様（実機確認済み）
+```powershell
+python bridge\notify_device.py done "テスト"
+```
 
-- LCD: JD9853 コントローラ 172×320（Arduino_GFX の ST7789 クラス＋公式デモの JD9853 初期化シーケンスを使用）
-- SPI: MOSI=GPIO2, SCLK=GPIO1, CS=GPIO14, DC=GPIO15, RST=GPIO22, BL=GPIO23（アクティブHigh）
-- タッチ: AXS5106L (I2C SDA=GPIO18, SCL=GPIO19) ※現状未使用
-- RGB LED: 非搭載（ファームウェア内では `ENABLE_RGB_LED 0` で無効化）
+または LAN 経由なら:
 
-## 仕組み
+```bash
+clawd-badge notify done
+```
 
-1. Claude Code の hooks（`~/.claude/settings.json`）がイベント発生時に通知スクリプト(プラグインの `notify_device.py` または npm クライアントの `clawd-badge notify`)を起動
-   - `UserPromptSubmit` → `working`（作業中）
-   - `Stop` → `done`（作業完了）
-   - `Notification` → `approval`（承認依頼・注意）
-     - `Notification` hookは権限承認以外（アイドル入力待ち等）でも発火するため、stdin JSONの `notification_type` が `permission_prompt` / `elicitation_dialog` / `agent_needs_input`（承認操作を伴う種別）のときのみ実際に `approval` を送信します。それ以外（`idle_prompt` 等）は送信をスキップします（`notification_type` が無い古いClaude Codeでは従来どおり送信します）。詳細は [`client/README.md`](client/README.md) 参照。
-   - `SessionEnd` → `idle`
-2. USB シリアル経由の場合は `{"state":"working","sid":"...","msg":"...","ts":...}` の JSON 1 行を COM ポート (115200bps) へ、LAN 経由の場合は同様の内容を `POST /notify` へ送信
-3. ファームウェアが状態に応じた Clawd のアニメーションと LED 表示に切り替え
+## リポジトリ構成
 
-### 複数セッション対応
+```
+firmware/ClawdBadge/     ESP32-C6 用 Arduino ファームウェア (JD9853 172x320)
+plugin/                  Claude Code プラグイン (hooks + 通知スクリプト、USB シリアル版)
+client/                  npm クライアント clawd-badge (hooks + CLI、LAN/HTTP 版)
+hardware/                3D プリント用ケース STL
+docs/media/              デモ動画・GIF
+bridge/notify_device.py  旧・手動設定用スクリプト(プラグイン版は plugin/scripts/ 参照)
+tools/gen_sprites.py     Clawd スプライト(clawd_sprites.h)を参照 GIF から再生成するツール
+```
+
+## 複数セッション対応
 
 `sid`(セッション識別子、任意の文字列)を含めることで、複数の Claude Code セッション(複数マシン/複数ターミナル)の状態を個別に管理できます。
 
 - `sid` を省略した場合は固定 `sid` `"_nosid"` として扱われ、旧クライアントは単一セッションとして動きます。
 - 画面(キャラ・ヘッダー)には全セッションを優先度 `error > approval > notify > working > done` で集約した状態を表示します。セッションが1つも無ければ `idle` です。
-- `state:"idle"`(`SessionEnd` 相当)を受信すると、そのセッションはテーブルから削除されます(集約状態には影響しません)。
-- 画面下部にはセッション数ぶんのドットが状態色で表示され(`approval` は約500ms周期で点滅)、右側にセッション数が数字で表示されます。セッションが0件のときはドット・数字とも非表示です。
-- セッションテーブルは最大8件。満杯の場合は最終更新が最も古いセッションを新しいセッションで上書きします。
-- タイムアウトはセッションごとに判定されます: `working` は30分、それ以外(`done`/`approval`/`notify`/`error`)は5分で自動的に該当セッションが削除されます。
+- `state:"idle"`(`SessionEnd` 相当)を受信すると、そのセッションはテーブルから削除されます。
+- 画面下部にはセッション数ぶんのドットが状態色で表示され(`approval` は約500ms周期で点滅)、右側にセッション数が数字で表示されます。
+- セッションテーブルは最大8件。満杯の場合は最終更新が最も古いセッションを上書きします。
+- タイムアウトはセッションごとに判定されます: `working` は30分、それ以外(`done`/`approval`/`notify`/`error`)は5分で自動削除されます。
 
-## WiFi / LAN 通知(ファームウェア側)
+## WiFi / LAN 通知(ファームウェア側インターフェース)
 
 `firmware/ClawdBadge/ClawdBadge.ino` は WiFi 接続と HTTP サーバに対応しています。
 
-- WiFi 認証情報は NVS(Preferences namespace `clawd`)に永続化され、起動時に自動接続します。切断時は 15 秒間隔で再接続を試みます。
+- WiFi 認証情報は NVS(Preferences namespace `clawd`)に永続化され、起動時に自動接続。切断時は 15 秒間隔で再接続します。
 - USB シリアル(115200bps、1行 JSON)経由のコマンド:
-  - `{"cmd":"wifi","ssid":"...","pass":"..."}` — WiFi 認証情報を保存して接続。`{"event":"wifi","status":"connecting"}` → `{"event":"wifi","status":"connected","ip":"...","hostname":"clawd-badge.local"}` (失敗時は `{"event":"wifi","status":"failed"}`) が返されます。
+  - `{"cmd":"wifi","ssid":"...","pass":"..."}` — WiFi 認証情報を保存して接続。`{"event":"wifi","status":"connected","ip":"...","hostname":"clawd-badge.local"}` などが返されます(失敗時は `"status":"failed"`)。
   - `{"cmd":"wifi_status"}` — 現在の WiFi 接続状態を問い合わせ
   - `{"cmd":"wifi_clear"}` — 保存済みの WiFi 認証情報を消去
 - HTTP サーバ(ポート 80): `POST /notify`(ボディ例 `{"state":"working","sid":"a1b2c3d4","msg":"..."}`)、`GET /status`
   - `GET /status` のレスポンスにはセッション数 `"sessions"`、承認待ち件数 `"waiting"`、各セッションの `"sid"`/`"state"` を格納した `"list"` 配列が含まれます。
 - mDNS 名 `clawd-badge.local` で名前解決できます。
-- 従来の USB シリアル通知(プラグイン版)はそのまま動作します。WiFi を設定しなくても今までどおり使えます。
+- USB シリアル通知(プラグイン版)は WiFi 未設定でもそのまま動作します。
 
-npm クライアント `clawd-badge setup` を使うと、これらのシリアルコマンドを内部的に呼び出して WiFi 設定を自動化できます(詳細は上記の「使い方(2)」を参照)。
+## ハードウェア仕様(実機確認済み)
 
-## 状態と表示
+- LCD: JD9853 コントローラ 172×320(Arduino_GFX の ST7789 クラス＋公式デモの JD9853 初期化シーケンスを使用)
+- SPI: MOSI=GPIO2, SCLK=GPIO1, CS=GPIO14, DC=GPIO15, RST=GPIO22, BL=GPIO23(アクティブHigh)
+- タッチ: AXS5106L (I2C SDA=GPIO18, SCL=GPIO19) ※現状未使用
+- RGB LED: 非搭載(ファームウェア内では `ENABLE_RGB_LED 0` で無効化)
 
-| state    | 画面                     |
-|----------|--------------------------|
-| working  | ハサミをカチカチ、タイピング風 |
-| done     | ぴょんと跳ねて ✓          |
-| approval | 手を振って「?」吹き出し    |
-| notify   | ベル＋首かしげ            |
-| idle     | ゆっくり呼吸＋まばたき     |
-| error    | 目が「><」               |
+## 3D プリントケース
 
-## ビルドと書き込み
+[`hardware/clawd-badge-body.stl`](hardware/clawd-badge-body.stl) に本プロジェクト用に設計したケース(本体)の STL を同梱しています。デモ動画のバッジはこのケースに収めたものです。
 
-WiFi / WebServer / mDNS を追加したことでスケッチがデフォルトパーティション(APP 1.2MB)に収まらなくなったため、
-`PartitionScheme=min_spiffs` を指定してビルドしてください(フラッシュ使用率 74%・RAM 使用率 14% で検証済み)。
+## ライセンス
 
-```powershell
-& "$env:USERPROFILE\arduino-cli\arduino-cli.exe" compile --fqbn esp32:esp32:esp32c6:CDCOnBoot=cdc,PartitionScheme=min_spiffs firmware\ClawdBadge
-& "$env:USERPROFILE\arduino-cli\arduino-cli.exe" upload -p COM5 --fqbn esp32:esp32:esp32c6:CDCOnBoot=cdc,PartitionScheme=min_spiffs firmware\ClawdBadge
-```
-
-## 手動テスト
-
-```powershell
-python bridge\notify_device.py done "テスト"
-```
+[MIT License](LICENSE)
