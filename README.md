@@ -86,8 +86,19 @@ clawd-badge setup --host <バッジのIP>
    - `Stop` → `done`（作業完了）
    - `Notification` → `approval`（承認依頼・注意）
    - `SessionEnd` → `idle`
-2. USB シリアル経由の場合は `{"state":"working","msg":"...","ts":...}` の JSON 1 行を COM ポート (115200bps) へ、LAN 経由の場合は同様の内容を `POST /notify` へ送信
+2. USB シリアル経由の場合は `{"state":"working","sid":"...","msg":"...","ts":...}` の JSON 1 行を COM ポート (115200bps) へ、LAN 経由の場合は同様の内容を `POST /notify` へ送信
 3. ファームウェアが状態に応じた Clawd のアニメーションと LED 表示に切り替え
+
+### 複数セッション対応
+
+`sid`(セッション識別子、任意の文字列)を含めることで、複数の Claude Code セッション(複数マシン/複数ターミナル)の状態を個別に管理できます。
+
+- `sid` を省略した場合は固定 `sid` `"_nosid"` として扱われ、旧クライアントは単一セッションとして動きます。
+- 画面(キャラ・ヘッダー)には全セッションを優先度 `error > approval > notify > working > done` で集約した状態を表示します。セッションが1つも無ければ `idle` です。
+- `state:"idle"`(`SessionEnd` 相当)を受信すると、そのセッションはテーブルから削除されます(集約状態には影響しません)。
+- 画面下部にはセッション数ぶんのドットが状態色で表示され(`approval` は約500ms周期で点滅)、右側にセッション数が数字で表示されます。セッションが0件のときはドット・数字とも非表示です。
+- セッションテーブルは最大8件。満杯の場合は最終更新が最も古いセッションを新しいセッションで上書きします。
+- タイムアウトはセッションごとに判定されます: `working` は30分、それ以外(`done`/`approval`/`notify`/`error`)は5分で自動的に該当セッションが削除されます。
 
 ## WiFi / LAN 通知(ファームウェア側)
 
@@ -98,7 +109,8 @@ clawd-badge setup --host <バッジのIP>
   - `{"cmd":"wifi","ssid":"...","pass":"..."}` — WiFi 認証情報を保存して接続。`{"event":"wifi","status":"connecting"}` → `{"event":"wifi","status":"connected","ip":"...","hostname":"clawd-badge.local"}` (失敗時は `{"event":"wifi","status":"failed"}`) が返されます。
   - `{"cmd":"wifi_status"}` — 現在の WiFi 接続状態を問い合わせ
   - `{"cmd":"wifi_clear"}` — 保存済みの WiFi 認証情報を消去
-- HTTP サーバ(ポート 80): `POST /notify`(ボディ例 `{"state":"working","msg":"..."}`)、`GET /status`
+- HTTP サーバ(ポート 80): `POST /notify`(ボディ例 `{"state":"working","sid":"a1b2c3d4","msg":"..."}`)、`GET /status`
+  - `GET /status` のレスポンスにはセッション数 `"sessions"`、承認待ち件数 `"waiting"`、各セッションの `"sid"`/`"state"` を格納した `"list"` 配列が含まれます。
 - mDNS 名 `clawd-badge.local` で名前解決できます。
 - 従来の USB シリアル通知(プラグイン版)はそのまま動作します。WiFi を設定しなくても今までどおり使えます。
 

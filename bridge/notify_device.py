@@ -20,19 +20,26 @@ def main() -> int:
     message = sys.argv[2] if len(sys.argv) > 2 else ""
 
     # hook の stdin JSON からセッション情報を拾えれば付加する（失敗しても無視）
-    # メッセージが引数で渡された場合は stdin を読まない（対話シェルからの起動でブロックするため）
+    # sid（セッション識別子）取得のため、message が引数で渡されていても stdin は読む。
+    # ただし対話シェルからの起動（isatty）ではブロックを避けるため読まない。
+    sid = ""
     try:
-        if len(sys.argv) <= 2 and not sys.stdin.isatty():
-            raw = sys.stdin.read()
+        if not sys.stdin.isatty():
+            # Windows では sys.stdin がロケールエンコーディング（CP932等）で解釈され、
+            # UTF-8 の日本語がサロゲート文字化して送信時に例外になるため、
+            # バイナリで読んで明示的に UTF-8 デコードする
+            # (utf-8-sig: PowerShellのパイプ等が付けるBOMも透過的に除去)
+            raw = sys.stdin.buffer.read().decode("utf-8-sig", "replace")
             if raw.strip():
                 hook = json.loads(raw)
                 if not message:
                     message = hook.get("message", "") or hook.get("prompt", "")[:48]
+                sid = hook.get("session_id", "")[:8]
     except Exception:
         pass
 
     payload = json.dumps(
-        {"state": state, "msg": message[:64], "ts": int(time.time())},
+        {"state": state, "msg": message[:64], "sid": sid, "ts": int(time.time())},
         ensure_ascii=False,
     )
 

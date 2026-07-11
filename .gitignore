@@ -1,3 +1,7 @@
 .claude/
 __pycache__/
 *.pyc
+# ルートでの ad-hoc npm install の残骸 (client/ のものは追跡対象)
+/node_modules/
+/package.json
+/package-lock.json

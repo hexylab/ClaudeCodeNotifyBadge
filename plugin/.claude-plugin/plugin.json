@@ -1,7 +1,7 @@
 {
   "name": "clawd-badge",
   "displayName": "Clawd Badge Notifier",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Claude Code の状態(作業中/完了/承認待ち)を ESP32-C6 LCD バッジ「Clawd Badge」へ USB シリアルで通知する hooks プラグイン",
   "author": {
     "name": "hexylab",

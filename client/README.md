@@ -61,6 +61,7 @@ npx -y clawd-badge setup --host 192.168.1.50
 - `state` は `working` `done` `approval` `notify` `idle` `error` のいずれか。
 - 送信先の解決順序: 環境変数 `CLAUDE_BADGE_HOST` → 設定ファイル(`~/.clawd-badge.json`)の `host` → mDNS名 `clawd-badge.local`。最初の候補で失敗した場合、次の候補に自動フォールバックします。
 - タイムアウトは3秒。**バッジに到達できない場合でも常に終了コード0・原則無出力**です(Claude Codeの動作をブロックしないための仕様です)。
+- 対話起動でない場合(Claude Code hooks経由など)は stdin から hook の JSON(`session_id` / `message` / `prompt`)を読み取り、`session_id` の先頭8文字を `sid`、`message`(または `prompt`)を64文字に切り詰めて `msg` として通知payloadに含めます。複数セッション対応のバッジ側でセッションを識別するために使われます。stdinの読み取り・解析に失敗した場合は `sid`/`msg` を付けずに送信します。
 
 ### `clawd-badge status`
 
